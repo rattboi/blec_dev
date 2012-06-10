@@ -153,9 +153,10 @@ static int labjack_access(struct blec_dev *my_dev, u8 *cmd_to_write, int write_l
   retval = usb_bulk_msg(my_dev->udev,
                         usb_sndbulkpipe(my_dev->udev, my_dev->bulk_out_endpointAddr), 
                         cmd_to_write, write_length, &write_amount, (HZ*1)/10);
-  retval = usb_bulk_msg(my_dev->udev, 
-                        usb_rcvbulkpipe(my_dev->udev, my_dev->bulk_in_endpointAddr), 
-                        response, read_length, &read_amount, (HZ*1)/10);
+  if(response) 
+    retval = usb_bulk_msg(my_dev->udev, 
+                          usb_rcvbulkpipe(my_dev->udev, my_dev->bulk_in_endpointAddr), 
+                          response, read_length, &read_amount, (HZ*1)/10);
 
   mutex_unlock(blec_mod_g.usb_rw_mutex);
 
@@ -282,27 +283,19 @@ static struct file_operations port_a_fops = {
 
 static void port_b_work_callback(struct work_struct *taskp)
 {
-  int ret;
-  int write_amount;
+  int retval;
   u8 fio4_buffer1[10] = {0x00, 0xF8, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0B, 0x84, 0x00};
   u8 fio4_buffer0[10] = {0x00, 0xF8, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0B, 0x04, 0x00};
 
   struct blec_dev *my_dev = (struct blec_dev *)container_of(taskp, struct blec_dev, port_b_tmr_w.work);
 
   my_dev->port_b_last_jiffies = jiffies;
-
   queue_delayed_work(my_dev->port_b_tmr_wq, &(my_dev->port_b_tmr_w), my_dev->port_b_delay*HZ);
 
   if (!(my_dev->port_b_mode))
-  {
-    extendedChecksum(fio4_buffer1, 10);
-    ret = usb_bulk_msg(my_dev->udev, usb_sndbulkpipe(my_dev->udev, my_dev->bulk_out_endpointAddr), fio4_buffer1, 10, &write_amount, HZ*1);
-  }
+    retval = labjack_access(my_dev, fio4_buffer1, 10, NULL, 0);
   else
-  {
-    extendedChecksum(fio4_buffer0, 10);
-    ret = usb_bulk_msg(my_dev->udev, usb_sndbulkpipe(my_dev->udev, my_dev->bulk_out_endpointAddr), fio4_buffer0, 10, &write_amount, HZ*1);
-  }
+    retval = labjack_access(my_dev, fio4_buffer0, 10, NULL, 0);
 
   my_dev->port_b_mode = !(my_dev->port_b_mode);
 }
@@ -311,7 +304,6 @@ static int port_b_open(struct inode *inode, struct file *file)
 {
   struct blec_dev *my_dev;
   int retval = 0;
-  int write_amount;
   u8 fio4_buffer1[10] = {0x00, 0xF8, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0B, 0x84, 0x00};
 
   printk(KERN_INFO "port b open called\n");
@@ -336,8 +328,7 @@ static int port_b_open(struct inode *inode, struct file *file)
   
   queue_delayed_work(my_dev->port_b_tmr_wq, &(my_dev->port_b_tmr_w), my_dev->port_b_delay * HZ);
 
-  extendedChecksum(fio4_buffer1, 10);
-  retval = usb_bulk_msg(my_dev->udev, usb_sndbulkpipe(my_dev->udev, my_dev->bulk_out_endpointAddr), fio4_buffer1, 10, &write_amount, HZ*1);
+  retval = labjack_access(my_dev, fio4_buffer1, 10, NULL, 0);
 
   printk(KERN_INFO "port b open over\n");
 
@@ -370,7 +361,6 @@ static int port_b_release(struct inode *inode, struct file *file)
 {
 
   struct blec_dev *my_dev;
-  int write_amount;
   int retval;
 
   u8 fio4_buffer0[10] = {0x00, 0xF8, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0B, 0x04, 0x00};
@@ -389,8 +379,7 @@ static int port_b_release(struct inode *inode, struct file *file)
   flush_workqueue(my_dev->port_b_tmr_wq);
   destroy_workqueue(my_dev->port_b_tmr_wq);
 
-  extendedChecksum(fio4_buffer0, 10);
-  retval = usb_bulk_msg(my_dev->udev, usb_sndbulkpipe(my_dev->udev, my_dev->bulk_out_endpointAddr), fio4_buffer0, 10, &write_amount, HZ*10);
+  retval = labjack_access(my_dev, fio4_buffer0, 10, NULL, 0);
 
 exit:
   return retval;
@@ -434,44 +423,18 @@ static ssize_t port_c_read(struct file *file, char *buf, size_t count, loff_t *o
   u8 read_mem_cmd_resp[40];
 
   struct blec_dev *my_dev;
-  int write_amount;
-  int read_amount;
   int retval;
   int i;
   int bits;
   unsigned long slope;
   unsigned long long temp_in_k;
+  int temp_in_c;
 
   my_dev = file->private_data;
 
-  extendedChecksum(fb_cmd_buf, 10);
-
-  retval = usb_bulk_msg(my_dev->udev, 
-                        usb_sndbulkpipe(my_dev->udev, my_dev->bulk_out_endpointAddr), 
-                        fb_cmd_buf, sizeof(fb_cmd_buf), &write_amount, HZ*10);
-  if (retval)
-  {
-    printk(KERN_INFO "port c bulk msg write probably timed out. write_amount = %d, retval = %d", write_amount,retval);
-  }
-
-  retval = usb_bulk_msg(my_dev->udev, 
-                        usb_rcvbulkpipe(my_dev->udev, my_dev->bulk_in_endpointAddr), 
-                        fb_cmd_resp, 12, &read_amount, HZ*10);
-
-  extendedChecksum(read_mem_cmd_buf, 8);
-
-  retval = usb_bulk_msg(my_dev->udev, 
-                        usb_sndbulkpipe(my_dev->udev, my_dev->bulk_out_endpointAddr), 
-                        read_mem_cmd_buf, sizeof(read_mem_cmd_buf), &write_amount, HZ*10);
-  if (retval)
-  {
-    printk(KERN_INFO "port c bulk msg write probably timed out. write_amount = %d, retval = %d", write_amount,retval);
-  }
-
-  retval = usb_bulk_msg(my_dev->udev, 
-                        usb_rcvbulkpipe(my_dev->udev, my_dev->bulk_in_endpointAddr), 
-                        read_mem_cmd_resp, 40, &read_amount, HZ*10);
-
+  retval = labjack_access(my_dev, fb_cmd_buf, 10, fb_cmd_resp, 12);
+  retval = labjack_access(my_dev, read_mem_cmd_buf, 8, read_mem_cmd_resp, 40);
+  
   bits = (fb_cmd_resp[10] << 8) + (fb_cmd_resp[9]);
 
   slope = 0;
@@ -481,7 +444,9 @@ static ssize_t port_c_read(struct file *file, char *buf, size_t count, loff_t *o
   temp_in_k = bits * slope;
   temp_in_k >>= 32;
 
-  printk(KERN_INFO "%lld\n", temp_in_k);
+  printk(KERN_INFO "KELVIN: %lld\n", temp_in_k);
+  temp_in_c = temp_in_k - 273;
+  printk(KERN_INFO "CELSIUS: %d\n", temp_in_c);
 
   return 0;
 }
@@ -616,7 +581,6 @@ static void blec_disconnect(struct usb_interface *interface)
   kfree(probed_dev);
 }
 
-
 static int __init blec_usb_init(void)
 {
   printk(KERN_INFO "blec_usb module loading...\n");
@@ -672,4 +636,4 @@ module_exit(blec_usb_exit);
 MODULE_AUTHOR(DRIVER_AUTHOR);
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.1");
+MODULE_VERSION("0.2");
