@@ -51,6 +51,7 @@ struct blec_dev {
   struct delayed_work      port_a_tmr_w;
   struct mutex             *port_a_mutex;
   int                      port_a_voltage;
+  int                      port_a_file_count;
 
   struct workqueue_struct  *port_b_tmr_wq;
   struct delayed_work      port_b_tmr_w;
@@ -187,23 +188,31 @@ static int port_a_open(struct inode *inode, struct file *file)
     goto exit;
   }
 
-  file->private_data = my_dev;
+  printk(KERN_INFO "filecount = %d\n", my_dev->port_a_file_count);
+  if (my_dev->port_a_file_count++ == 0)
+  {
+    printk(KERN_INFO "initting: filecount = %d\n", my_dev->port_a_file_count);
+    file->private_data = my_dev;
 
-  extendedChecksum(eio2_config_io_cmd, 12);
-  retval = usb_bulk_msg(my_dev->udev,
-                        usb_sndbulkpipe(my_dev->udev, my_dev->bulk_out_endpointAddr), 
-                        eio2_config_io_cmd, 12, &write_amount, (HZ*1)/10);
-  printk(KERN_INFO "PORTA: OPEN: write_amount = %d", write_amount);
-  retval = usb_bulk_msg(my_dev->udev, 
-                        usb_rcvbulkpipe(my_dev->udev, my_dev->bulk_in_endpointAddr), 
-                        eio2_config_io_resp, 12, &read_amount, (HZ*1)/10);
-  printk(KERN_INFO "PORTA: OPEN: read_amount = %d", read_amount);
-  printk(KERN_INFO "PORTA: OPEN: error_code = %d", eio2_config_io_resp[6]);
+    extendedChecksum(eio2_config_io_cmd, 12);
+    retval = usb_bulk_msg(my_dev->udev,
+                          usb_sndbulkpipe(my_dev->udev, my_dev->bulk_out_endpointAddr), 
+                          eio2_config_io_cmd, 12, &write_amount, (HZ*1)/10);
+    printk(KERN_INFO "PORTA: OPEN: write_amount = %d", write_amount);
+    retval = usb_bulk_msg(my_dev->udev, 
+                          usb_rcvbulkpipe(my_dev->udev, my_dev->bulk_in_endpointAddr), 
+                          eio2_config_io_resp, 12, &read_amount, (HZ*1)/10);
+    printk(KERN_INFO "PORTA: OPEN: read_amount = %d", read_amount);
+    printk(KERN_INFO "PORTA: OPEN: error_code = %d", eio2_config_io_resp[6]);
 
-  my_dev->port_a_tmr_wq = create_workqueue(WQ_NAME);
-  INIT_DELAYED_WORK(&(my_dev->port_a_tmr_w), port_a_work_callback);
-  
-  queue_delayed_work(my_dev->port_a_tmr_wq, &(my_dev->port_a_tmr_w), 1 * HZ);
+    if (!my_dev->port_a_tmr_wq)
+    {
+      my_dev->port_a_tmr_wq = create_workqueue(WQ_NAME);
+      INIT_DELAYED_WORK(&(my_dev->port_a_tmr_w), port_a_work_callback);
+      
+      queue_delayed_work(my_dev->port_a_tmr_wq, &(my_dev->port_a_tmr_w), 1 * HZ);
+    }
+  }
 
   printk(KERN_INFO "port a open over\n");
 
@@ -226,9 +235,18 @@ static int port_a_release(struct inode *inode, struct file *file)
     goto exit;
   }
 
-  cancel_delayed_work(&(my_dev->port_a_tmr_w));
-  flush_workqueue(my_dev->port_a_tmr_wq);
-  destroy_workqueue(my_dev->port_a_tmr_wq);
+  printk(KERN_INFO "filecount = %d\n", my_dev->port_a_file_count);
+  if (--(my_dev->port_a_file_count) == 0)
+  {
+    printk(KERN_INFO "should be 0, deleting: filecount = %d\n", my_dev->port_a_file_count);
+    cancel_delayed_work(&(my_dev->port_a_tmr_w));
+
+    if (my_dev->port_a_tmr_wq)
+    {
+      flush_workqueue(my_dev->port_a_tmr_wq);
+      destroy_workqueue(my_dev->port_a_tmr_wq);
+    }
+  }
 
 exit:
   return retval;
@@ -239,14 +257,18 @@ static ssize_t port_a_read(struct file *file, char *buf, size_t count, loff_t *o
   struct blec_dev *my_dev;
   my_dev = file->private_data;
 
+  printk(KERN_INFO "before mutex lock\n");
   mutex_lock(my_dev->port_a_mutex);
+  printk(KERN_INFO "after mutex lock\n");
 
   while (my_dev->port_a_voltage < 100)
     msleep(100);
 
   printk(KERN_INFO "Airlock Open!");
 
+  printk(KERN_INFO "before mutex unlock\n");
   mutex_unlock(my_dev->port_a_mutex);
+  printk(KERN_INFO "after mutex unlock\n");
   return 0;
 }
 
@@ -587,7 +609,9 @@ static void blec_disconnect(struct usb_interface *interface)
   if (err == -1)
     printk(KERN_INFO "blec_usb blec_disconnect(): didn't find interface in pool (this bad) \n");
 
-  kfree(probed_dev->port_a_mutex);
+  if (probed_dev->port_a_mutex)
+    kfree(probed_dev->port_a_mutex);
+
   kfree(probed_dev);
 }
 
