@@ -32,6 +32,7 @@ static struct blec_mod {
   dev_t                 t_node;
   struct class          *dev_class;
   struct usb_interface  *intf_pool[MAX_DEV * 3];
+  struct mutex          *usb_rw_mutex;
 } blec_mod_g;
 
 struct blec_dev {
@@ -141,12 +142,31 @@ exit:
   return NULL;
 }
 
+static int labjack_access(struct blec_dev *my_dev, u8 *cmd_to_write, int write_length, u8 *response, int read_length)
+{
+  int write_amount, read_amount, retval;
+
+  mutex_lock(blec_mod_g.usb_rw_mutex);
+
+  extendedChecksum(cmd_to_write, write_length);
+
+  retval = usb_bulk_msg(my_dev->udev,
+                        usb_sndbulkpipe(my_dev->udev, my_dev->bulk_out_endpointAddr), 
+                        cmd_to_write, write_length, &write_amount, (HZ*1)/10);
+  retval = usb_bulk_msg(my_dev->udev, 
+                        usb_rcvbulkpipe(my_dev->udev, my_dev->bulk_in_endpointAddr), 
+                        response, read_length, &read_amount, (HZ*1)/10);
+
+  mutex_unlock(blec_mod_g.usb_rw_mutex);
+
+  return retval;
+
+}
+
 static void port_a_work_callback(struct work_struct *taskp)
 {
   u8 eio2_read_cmd[10] = {0x00, 0xF8, 0x02, 0x00, 0x00, 0x00, 0xAA, 1, 10, 31}; // AIN, AIN10 = EIO2, Single-ended
   u8 eio2_read_resp[12];
-  int write_amount;
-  int read_amount;
   int bits;
   int volts;
   int retval;
@@ -154,14 +174,7 @@ static void port_a_work_callback(struct work_struct *taskp)
   struct blec_dev *my_dev = (struct blec_dev *)container_of(taskp, struct blec_dev, port_a_tmr_w.work);
   queue_delayed_work(my_dev->port_a_tmr_wq, &(my_dev->port_a_tmr_w), 1*HZ);
 
-  extendedChecksum(eio2_read_cmd, 10);
-
-  retval = usb_bulk_msg(my_dev->udev,
-                        usb_sndbulkpipe(my_dev->udev, my_dev->bulk_out_endpointAddr), 
-                        eio2_read_cmd, 10, &write_amount, (HZ*1)/10);
-  retval = usb_bulk_msg(my_dev->udev, 
-                        usb_rcvbulkpipe(my_dev->udev, my_dev->bulk_in_endpointAddr), 
-                        eio2_read_resp, 12, &read_amount, (HZ*1)/10);
+  retval = labjack_access(my_dev, eio2_read_cmd, 10, eio2_read_resp, 12);
 
   bits = (eio2_read_resp[10] << 8) + (eio2_read_resp[9]);
   volts = (bits*244)>>16;
@@ -174,8 +187,6 @@ static int port_a_open(struct inode *inode, struct file *file)
 
   u8 eio2_config_io_cmd[12] = {0x00, 0xF8, 0x03, 0x0B, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x04 }; // ConfigIO
   u8 eio2_config_io_resp[12];
-  int write_amount;
-  int read_amount;
   int retval = 0;
 
   printk(KERN_INFO "port a open called\n");
@@ -188,21 +199,15 @@ static int port_a_open(struct inode *inode, struct file *file)
     goto exit;
   }
 
+  file->private_data = my_dev;
+
   printk(KERN_INFO "filecount = %d\n", my_dev->port_a_file_count);
   if (my_dev->port_a_file_count++ == 0)
   {
     printk(KERN_INFO "initting: filecount = %d\n", my_dev->port_a_file_count);
-    file->private_data = my_dev;
 
-    extendedChecksum(eio2_config_io_cmd, 12);
-    retval = usb_bulk_msg(my_dev->udev,
-                          usb_sndbulkpipe(my_dev->udev, my_dev->bulk_out_endpointAddr), 
-                          eio2_config_io_cmd, 12, &write_amount, (HZ*1)/10);
-    printk(KERN_INFO "PORTA: OPEN: write_amount = %d", write_amount);
-    retval = usb_bulk_msg(my_dev->udev, 
-                          usb_rcvbulkpipe(my_dev->udev, my_dev->bulk_in_endpointAddr), 
-                          eio2_config_io_resp, 12, &read_amount, (HZ*1)/10);
-    printk(KERN_INFO "PORTA: OPEN: read_amount = %d", read_amount);
+    retval = labjack_access(my_dev, eio2_config_io_cmd, 12, eio2_config_io_resp, 12);
+
     printk(KERN_INFO "PORTA: OPEN: error_code = %d", eio2_config_io_resp[6]);
 
     if (!my_dev->port_a_tmr_wq)
@@ -235,16 +240,16 @@ static int port_a_release(struct inode *inode, struct file *file)
     goto exit;
   }
 
-  printk(KERN_INFO "filecount = %d\n", my_dev->port_a_file_count);
   if (--(my_dev->port_a_file_count) == 0)
   {
-    printk(KERN_INFO "should be 0, deleting: filecount = %d\n", my_dev->port_a_file_count);
+    printk(KERN_INFO "PORTA: Release: deleting: filecount = %d\n", my_dev->port_a_file_count);
     cancel_delayed_work(&(my_dev->port_a_tmr_w));
 
     if (my_dev->port_a_tmr_wq)
     {
       flush_workqueue(my_dev->port_a_tmr_wq);
       destroy_workqueue(my_dev->port_a_tmr_wq);
+      my_dev->port_a_tmr_wq = NULL;
     }
   }
 
@@ -257,18 +262,14 @@ static ssize_t port_a_read(struct file *file, char *buf, size_t count, loff_t *o
   struct blec_dev *my_dev;
   my_dev = file->private_data;
 
-  printk(KERN_INFO "before mutex lock\n");
   mutex_lock(my_dev->port_a_mutex);
-  printk(KERN_INFO "after mutex lock\n");
 
   while (my_dev->port_a_voltage < 100)
     msleep(100);
 
   printk(KERN_INFO "Airlock Open!");
 
-  printk(KERN_INFO "before mutex unlock\n");
   mutex_unlock(my_dev->port_a_mutex);
-  printk(KERN_INFO "after mutex unlock\n");
   return 0;
 }
 
@@ -640,6 +641,9 @@ static int __init blec_usb_init(void)
     goto usb_reg_err;
   }
 
+  blec_mod_g.usb_rw_mutex = kzalloc(sizeof(struct mutex),GFP_KERNEL);
+  mutex_init(blec_mod_g.usb_rw_mutex);
+
   return 0;
 
 usb_reg_err:
@@ -653,6 +657,10 @@ chrdev_err:
 static void __exit blec_usb_exit(void)
 {
   printk(KERN_INFO "blec_usb module unloading...\n");
+
+  if (blec_mod_g.usb_rw_mutex)
+    kfree(blec_mod_g.usb_rw_mutex);
+
   usb_deregister(&blec_driver);
   class_destroy(blec_mod_g.dev_class);
   unregister_chrdev_region(blec_mod_g.t_node, MAX_DEV*3);
