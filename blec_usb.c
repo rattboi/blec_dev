@@ -9,6 +9,7 @@
 #include <linux/timer.h>
 #include <linux/usb.h>
 #include <linux/workqueue.h>
+#include <linux/mutex.h>
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <asm/uaccess.h>
@@ -48,6 +49,8 @@ struct blec_dev {
 
   struct workqueue_struct  *port_a_tmr_wq;
   struct delayed_work      port_a_tmr_w;
+  struct mutex             *port_a_mutex;
+  int                      port_a_voltage;
 
   struct workqueue_struct  *port_b_tmr_wq;
   struct delayed_work      port_b_tmr_w;
@@ -161,7 +164,7 @@ static void port_a_work_callback(struct work_struct *taskp)
 
   bits = (eio2_read_resp[10] << 8) + (eio2_read_resp[9]);
   volts = (bits*244)>>16;
-  printk(KERN_INFO "PORTA: WORK: volts = %d", volts);
+  my_dev->port_a_voltage = volts;
 }
 
 static int port_a_open(struct inode *inode, struct file *file)
@@ -208,7 +211,6 @@ exit:
   return retval;
 }
 
-
 static int port_a_release(struct inode *inode, struct file *file)
 {
   struct blec_dev *my_dev;
@@ -232,10 +234,27 @@ exit:
   return retval;
 }
 
+static ssize_t port_a_read(struct file *file, char *buf, size_t count, loff_t *offset)
+{
+  struct blec_dev *my_dev;
+  my_dev = file->private_data;
+
+  mutex_lock(my_dev->port_a_mutex);
+
+  while (my_dev->port_a_voltage < 100)
+    msleep(100);
+
+  printk(KERN_INFO "Airlock Open!");
+
+  mutex_unlock(my_dev->port_a_mutex);
+  return 0;
+}
+
 static struct file_operations port_a_fops = {
   .owner    = THIS_MODULE,
   .open     = port_a_open,
   .release  = port_a_release,
+  .read     = port_a_read,
 };
 
 static void port_b_work_callback(struct work_struct *taskp)
@@ -531,6 +550,10 @@ static int blec_probe(struct usb_interface *interface, const struct usb_device_i
   }
 
   probed_dev->udev = usb_get_dev(interface_to_usbdev(interface));
+  
+  probed_dev->port_a_mutex = kzalloc(sizeof(struct mutex),GFP_KERNEL);
+  mutex_init(probed_dev->port_a_mutex);
+
   usb_set_intfdata(interface, probed_dev);
 
   return 0;
@@ -564,6 +587,7 @@ static void blec_disconnect(struct usb_interface *interface)
   if (err == -1)
     printk(KERN_INFO "blec_usb blec_disconnect(): didn't find interface in pool (this bad) \n");
 
+  kfree(probed_dev->port_a_mutex);
   kfree(probed_dev);
 }
 
