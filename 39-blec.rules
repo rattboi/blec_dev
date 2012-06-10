@@ -1,0 +1,7 @@
+KERNEL!="lab[0-9]*", GOTO="blec_rules_end"
+ACTION!="add|create", GOTO="blec_rules_end"
+
+KERNEL=="lab[0-9]*", GROUP="users"
+ATTRS{idVendor}=="0cd5", ATTRS{idProduct}=="0003", MODE="0666", GROUP="users"
+
+LABEL="blec_rules_end"
