@@ -590,13 +590,13 @@ static void blec_disconnect(struct usb_interface *interface)
 
   probed_dev = usb_get_intfdata(interface);
 
-  if (my_dev->port_a_file_count != 0)
+  if (probed_dev->port_a_file_count != 0)
   {
     printk(KERN_INFO "BLEC_USB: blec_disconnect: port a files open, destroying...\n");
     port_a_destroy(probed_dev);
   }
 
-  if (my_dev->port_a_file_count != 0)
+  if (probed_dev->port_b_file_count != 0)
   {
     printk(KERN_INFO "BLEC_USB: blec_disconnect: port b files open, destroying...\n");
     port_b_destroy(probed_dev);
