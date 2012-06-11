@@ -19,7 +19,7 @@
 #define DRIVER_DESC "BLECMU USB Driver"
 #define DRIVER_NAME "blec_usb"
 
-#define MAX_DEV 15
+#define MAX_DEV 25
 
 #define LABJACK_VENDOR_ID 0x0cd5
 #define LABJACK_HV_PRODUCT_ID 0x0003
