@@ -1,6 +1,6 @@
 KERNEL!="lab[0-9]*", GOTO="blec_rules_end"
 ACTION!="add|create", GOTO="blec_rules_end"
 
-KERNEL=="lab[0-9]*", GROUP="users", MODE="0666"
+KERNEL=="lab[0-9]*", MODE="0666"
 
 LABEL="blec_rules_end"

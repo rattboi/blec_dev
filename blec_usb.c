@@ -370,14 +370,20 @@ exit:
 static ssize_t port_b_read(struct file *file, char *buf, size_t count, loff_t *offset)
 {
   struct blec_dev *my_dev;
+  int len;
+  u8 time_since_last;
   my_dev = file->private_data;
 
   access_count++;
 
-  printk(KERN_INFO "jiffies since last: %lu\n", jiffies - my_dev->port_b_last_jiffies);
-  printk(KERN_INFO "time since last: %lu\n", (jiffies - my_dev->port_b_last_jiffies)/HZ);
+  time_since_last = (jiffies - my_dev->port_b_last_jiffies)/HZ;
 
-  return 0;
+  printk(KERN_INFO "time since last: %d\n", time_since_last);
+
+  len = min_t(ssize_t, count, sizeof(u8));
+  copy_to_user(buf, &time_since_last, len);
+
+  return len;
 }
 
 static ssize_t port_b_write(struct file *file, const char *buf, size_t count, loff_t *offset)
