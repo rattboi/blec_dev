@@ -389,11 +389,15 @@ static ssize_t port_b_read(struct file *file, char *buf, size_t count, loff_t *o
 static ssize_t port_b_write(struct file *file, const char *buf, size_t count, loff_t *offset)
 {
   struct blec_dev *my_dev;
+  u8 byte_read;
   my_dev = file->private_data;
 
   access_count++;
   
-  my_dev->port_b_delay = 10;
+  copy_from_user(&byte_read,buf,sizeof(byte_read));
+  printk(KERN_INFO "byte_read = %d\n", byte_read);
+
+  my_dev->port_b_delay = byte_read;
 
   return 0;
 }
@@ -483,6 +487,8 @@ static ssize_t port_c_read(struct file *file, char *buf, size_t count, loff_t *o
   unsigned long slope;
   unsigned long long temp_in_k;
   int temp_in_c;
+  s32 temp_read;
+  int len;
 
   access_count++;
 
@@ -504,7 +510,11 @@ static ssize_t port_c_read(struct file *file, char *buf, size_t count, loff_t *o
   temp_in_c = temp_in_k - 273;
   printk(KERN_INFO "PORTC: CELSIUS: %d\n", temp_in_c);
 
-  return 0;
+  temp_read = temp_in_c;
+  len = min_t(ssize_t, count, sizeof(s32));
+  copy_to_user(buf, &temp_read, len);
+
+  return len;
 }
 
 static struct file_operations port_c_fops = {
