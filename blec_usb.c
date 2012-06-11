@@ -10,6 +10,7 @@
 #include <linux/usb.h>
 #include <linux/workqueue.h>
 #include <linux/mutex.h>
+#include <linux/moduleparam.h>
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <asm/uaccess.h>
@@ -28,6 +29,9 @@
 
 static int blec_probe(struct usb_interface *interface, const struct usb_device_id *id);
 static void blec_disconnect(struct usb_interface *interface);
+
+static   int  access_count;
+module_param(access_count, int, S_IRUGO);
 
 static struct blec_mod {
   dev_t                 t_node;
@@ -253,6 +257,7 @@ static int port_a_release(struct inode *inode, struct file *file)
 
   if (!my_dev)
   {
+    printk(KERN_INFO "PORTA: release, no interface\n");
     retval = -ENODEV;
     goto exit;
   }
@@ -264,7 +269,7 @@ static int port_a_release(struct inode *inode, struct file *file)
   }
 
 exit:
-  return retval;
+  return 0;
 }
 
 
@@ -273,14 +278,15 @@ static ssize_t port_a_read(struct file *file, char *buf, size_t count, loff_t *o
   struct blec_dev *my_dev;
   my_dev = file->private_data;
 
-  mutex_lock(my_dev->port_a_mutex);
+  access_count++;
 
+  mutex_lock(my_dev->port_a_mutex);
   while (my_dev->port_a_voltage < 100)
     msleep(100);
-
-  printk(KERN_INFO "Airlock Open!");
-
   mutex_unlock(my_dev->port_a_mutex);
+
+  printk(KERN_INFO "Airlock Open!\n");
+
   return 0;
 }
 
@@ -361,6 +367,8 @@ static ssize_t port_b_read(struct file *file, char *buf, size_t count, loff_t *o
   struct blec_dev *my_dev;
   my_dev = file->private_data;
 
+  access_count++;
+
   printk(KERN_INFO "jiffies since last: %lu\n", jiffies - my_dev->port_b_last_jiffies);
   printk(KERN_INFO "time since last: %lu\n", (jiffies - my_dev->port_b_last_jiffies)/HZ);
 
@@ -372,6 +380,8 @@ static ssize_t port_b_write(struct file *file, const char *buf, size_t count, lo
   struct blec_dev *my_dev;
   my_dev = file->private_data;
 
+  access_count++;
+  
   my_dev->port_b_delay = 10;
 
   return 0;
@@ -391,7 +401,6 @@ static void port_b_destroy(struct blec_dev *my_dev)
 
 static int port_b_release(struct inode *inode, struct file *file)
 {
-
   struct blec_dev *my_dev;
   int retval;
 
@@ -463,6 +472,8 @@ static ssize_t port_c_read(struct file *file, char *buf, size_t count, loff_t *o
   unsigned long slope;
   unsigned long long temp_in_k;
   int temp_in_c;
+
+  access_count++;
 
   my_dev = file->private_data;
 
@@ -630,6 +641,7 @@ static void blec_disconnect(struct usb_interface *interface)
 static int __init blec_usb_init(void)
 {
   printk(KERN_INFO "BLEC_USB: module loading...\n");
+
 
   memset(&blec_mod_g, 0, sizeof(struct blec_mod));
 
