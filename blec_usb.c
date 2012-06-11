@@ -19,7 +19,7 @@
 #define DRIVER_DESC "BLECMU USB Driver"
 #define DRIVER_NAME "blec_usb"
 
-#define MAX_DEV 15
+#define MAX_DEV 35
 
 #define LABJACK_VENDOR_ID 0x0cd5
 #define LABJACK_HV_PRODUCT_ID 0x0003
@@ -484,9 +484,8 @@ static ssize_t port_c_read(struct file *file, char *buf, size_t count, loff_t *o
   int retval;
   int i;
   int bits;
-  unsigned long slope;
-  unsigned long long temp_in_k;
-  int temp_in_c;
+  u64 slope;
+  u64 temp_in_k;
   s32 temp_read;
   int len;
 
@@ -506,11 +505,8 @@ static ssize_t port_c_read(struct file *file, char *buf, size_t count, loff_t *o
   temp_in_k = bits * slope;
   temp_in_k >>= 32;
 
-  printk(KERN_INFO "PORTC: KELVIN: %lld\n", temp_in_k);
-  temp_in_c = temp_in_k - 273;
-  printk(KERN_INFO "PORTC: CELSIUS: %d\n", temp_in_c);
+  temp_read = temp_in_k - 273;
 
-  temp_read = temp_in_c;
   len = min_t(ssize_t, count, sizeof(s32));
   copy_to_user(buf, &temp_read, len);
 
