@@ -10,6 +10,7 @@
 #include <linux/usb.h>
 #include <linux/workqueue.h>
 #include <linux/mutex.h>
+#include <linux/moduleparam.h>
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <asm/uaccess.h>
@@ -23,10 +24,14 @@
 #define LABJACK_VENDOR_ID 0x0cd5
 #define LABJACK_HV_PRODUCT_ID 0x0003
 
-#define WQ_NAME "blec_wq"
+#define WQ_NAME_A "blec_wq_port_a"
+#define WQ_NAME_B "blec_wq_port_b"
 
 static int blec_probe(struct usb_interface *interface, const struct usb_device_id *id);
 static void blec_disconnect(struct usb_interface *interface);
+
+static   int  access_count;
+module_param(access_count, int, S_IRUGO);
 
 static struct blec_mod {
   dev_t                 t_node;
@@ -59,6 +64,9 @@ struct blec_dev {
   int                      port_b_delay;
   int                      port_b_mode;
   unsigned long int        port_b_last_jiffies;
+  int                      port_b_file_count;
+
+  int                      port_c_file_count;
 };
 
 static struct usb_device_id lj_table[] = {
@@ -123,7 +131,7 @@ static struct blec_dev* get_blec_dev(struct inode *inode)
 
   if (!intf)
   {
-    printk(KERN_INFO "Can't find device with minor number: %d\n",subminor);
+    printk(KERN_INFO "BLEC_USB: Can't find device with minor number: %d\n",subminor);
     retval = -ENODEV;
     goto exit;
   }
@@ -131,7 +139,7 @@ static struct blec_dev* get_blec_dev(struct inode *inode)
   my_dev = usb_get_intfdata(intf);
   if (!my_dev)
   {
-    printk(KERN_INFO "Can't find device, again...\n");
+    printk(KERN_INFO "BLEC_USB: Can't find device, again...\n");
     retval = -ENODEV;
     goto exit;
   }
@@ -190,7 +198,7 @@ static int port_a_open(struct inode *inode, struct file *file)
   u8 eio2_config_io_resp[12];
   int retval = 0;
 
-  printk(KERN_INFO "port a open called\n");
+  printk(KERN_INFO "PORTA: open called\n");
 
   my_dev = get_blec_dev(inode);
 
@@ -202,10 +210,10 @@ static int port_a_open(struct inode *inode, struct file *file)
 
   file->private_data = my_dev;
 
-  printk(KERN_INFO "filecount = %d\n", my_dev->port_a_file_count);
+  printk(KERN_INFO "PORTA: filecount = %d\n", my_dev->port_a_file_count);
   if (my_dev->port_a_file_count++ == 0)
   {
-    printk(KERN_INFO "initting: filecount = %d\n", my_dev->port_a_file_count);
+    printk(KERN_INFO "PORTA: initting: filecount = %d\n", my_dev->port_a_file_count);
 
     retval = labjack_access(my_dev, eio2_config_io_cmd, 12, eio2_config_io_resp, 12);
 
@@ -213,37 +221,21 @@ static int port_a_open(struct inode *inode, struct file *file)
 
     if (!my_dev->port_a_tmr_wq)
     {
-      my_dev->port_a_tmr_wq = create_workqueue(WQ_NAME);
+      my_dev->port_a_tmr_wq = create_workqueue(WQ_NAME_A);
       INIT_DELAYED_WORK(&(my_dev->port_a_tmr_w), port_a_work_callback);
       
       queue_delayed_work(my_dev->port_a_tmr_wq, &(my_dev->port_a_tmr_w), 1 * HZ);
     }
   }
 
-  printk(KERN_INFO "port a open over\n");
+  printk(KERN_INFO "PORTA: open over\n");
 
 exit:
   return retval;
 }
 
-static int port_a_release(struct inode *inode, struct file *file)
+static void port_a_destroy(struct blec_dev *my_dev)
 {
-  struct blec_dev *my_dev;
-  int retval = 0;
-
-  printk(KERN_INFO "port a release called\n");
-
-  my_dev = get_blec_dev(inode);
-
-  if (!my_dev)
-  {
-    retval = -ENODEV;
-    goto exit;
-  }
-
-  if (--(my_dev->port_a_file_count) == 0)
-  {
-    printk(KERN_INFO "PORTA: Release: deleting: filecount = %d\n", my_dev->port_a_file_count);
     cancel_delayed_work(&(my_dev->port_a_tmr_w));
 
     if (my_dev->port_a_tmr_wq)
@@ -252,25 +244,49 @@ static int port_a_release(struct inode *inode, struct file *file)
       destroy_workqueue(my_dev->port_a_tmr_wq);
       my_dev->port_a_tmr_wq = NULL;
     }
+}
+
+static int port_a_release(struct inode *inode, struct file *file)
+{
+  struct blec_dev *my_dev;
+  int retval = 0;
+
+  printk(KERN_INFO "PORTA: release called\n");
+
+  my_dev = get_blec_dev(inode);
+
+  if (!my_dev)
+  {
+    printk(KERN_INFO "PORTA: release, no interface\n");
+    retval = -ENODEV;
+    goto exit;
+  }
+
+  if (--(my_dev->port_a_file_count) == 0)
+  {
+    printk(KERN_INFO "PORTA: Release: deleting: filecount = %d\n", my_dev->port_a_file_count);
+    port_a_destroy(my_dev);
   }
 
 exit:
-  return retval;
+  return 0;
 }
+
 
 static ssize_t port_a_read(struct file *file, char *buf, size_t count, loff_t *offset)
 {
   struct blec_dev *my_dev;
   my_dev = file->private_data;
 
-  mutex_lock(my_dev->port_a_mutex);
+  access_count++;
 
+  mutex_lock(my_dev->port_a_mutex);
   while (my_dev->port_a_voltage < 100)
     msleep(100);
-
-  printk(KERN_INFO "Airlock Open!");
-
   mutex_unlock(my_dev->port_a_mutex);
+
+  printk(KERN_INFO "Airlock Open!\n");
+
   return 0;
 }
 
@@ -306,7 +322,7 @@ static int port_b_open(struct inode *inode, struct file *file)
   int retval = 0;
   u8 fio4_buffer1[10] = {0x00, 0xF8, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0B, 0x84, 0x00};
 
-  printk(KERN_INFO "port b open called\n");
+  printk(KERN_INFO "PORTB: open called\n");
 
   my_dev = get_blec_dev(inode);
 
@@ -321,16 +337,26 @@ static int port_b_open(struct inode *inode, struct file *file)
 
   file->private_data = my_dev;
 
-  printk(KERN_INFO "port b open called\n");
+  printk(KERN_INFO "PORTB: open called\n");
 
-  my_dev->port_b_tmr_wq = create_workqueue(WQ_NAME);
-  INIT_DELAYED_WORK(&(my_dev->port_b_tmr_w), port_b_work_callback);
-  
-  queue_delayed_work(my_dev->port_b_tmr_wq, &(my_dev->port_b_tmr_w), my_dev->port_b_delay * HZ);
+  printk(KERN_INFO "PORTB: filecount = %d\n", my_dev->port_b_file_count);
+  if (my_dev->port_b_file_count++ == 0)
+  {
+    printk(KERN_INFO "PORTB: initting: filecount = %d\n", my_dev->port_b_file_count);
+
+    if (!my_dev->port_b_tmr_wq)
+    {
+      my_dev->port_b_tmr_wq = create_workqueue(WQ_NAME_B);
+      INIT_DELAYED_WORK(&(my_dev->port_b_tmr_w), port_b_work_callback);
+      
+      queue_delayed_work(my_dev->port_b_tmr_wq, &(my_dev->port_b_tmr_w), my_dev->port_b_delay * HZ);
+      my_dev->port_b_last_jiffies = jiffies;
+    }
+  }
 
   retval = labjack_access(my_dev, fio4_buffer1, 10, NULL, 0);
 
-  printk(KERN_INFO "port b open over\n");
+  printk(KERN_INFO "PORTB: open over\n");
 
 exit:
   return retval;
@@ -340,6 +366,8 @@ static ssize_t port_b_read(struct file *file, char *buf, size_t count, loff_t *o
 {
   struct blec_dev *my_dev;
   my_dev = file->private_data;
+
+  access_count++;
 
   printk(KERN_INFO "jiffies since last: %lu\n", jiffies - my_dev->port_b_last_jiffies);
   printk(KERN_INFO "time since last: %lu\n", (jiffies - my_dev->port_b_last_jiffies)/HZ);
@@ -352,20 +380,33 @@ static ssize_t port_b_write(struct file *file, const char *buf, size_t count, lo
   struct blec_dev *my_dev;
   my_dev = file->private_data;
 
+  access_count++;
+  
   my_dev->port_b_delay = 10;
 
   return 0;
 }
 
+static void port_b_destroy(struct blec_dev *my_dev)
+{
+  cancel_delayed_work(&(my_dev->port_b_tmr_w));
+
+  if (my_dev->port_b_tmr_wq)
+  {
+    flush_workqueue(my_dev->port_b_tmr_wq);
+    destroy_workqueue(my_dev->port_b_tmr_wq);
+    my_dev->port_b_tmr_wq = NULL;
+  }
+}
+
 static int port_b_release(struct inode *inode, struct file *file)
 {
-
   struct blec_dev *my_dev;
   int retval;
 
   u8 fio4_buffer0[10] = {0x00, 0xF8, 0x02, 0x00, 0x00, 0x00, 0x00, 0x0B, 0x04, 0x00};
 
-  printk(KERN_INFO "port b release called\n");
+  printk(KERN_INFO "PORTB: release called\n");
 
   my_dev = get_blec_dev(inode);
 
@@ -375,9 +416,11 @@ static int port_b_release(struct inode *inode, struct file *file)
     goto exit;
   }
 
-  cancel_delayed_work(&(my_dev->port_b_tmr_w));
-  flush_workqueue(my_dev->port_b_tmr_wq);
-  destroy_workqueue(my_dev->port_b_tmr_wq);
+  if (--(my_dev->port_b_file_count) == 0)
+  {
+    printk(KERN_INFO "PORTB: Release: deleting: filecount = %d\n", my_dev->port_b_file_count);
+    port_b_destroy(my_dev);
+  }
 
   retval = labjack_access(my_dev, fio4_buffer0, 10, NULL, 0);
 
@@ -398,7 +441,7 @@ static int port_c_open(struct inode *inode, struct file *file)
   struct blec_dev *my_dev;
   int retval = 0;
 
-  printk(KERN_INFO "port c open called\n");
+  printk(KERN_INFO "PORTC: open called\n");
 
   my_dev = get_blec_dev(inode);
 
@@ -409,7 +452,7 @@ static int port_c_open(struct inode *inode, struct file *file)
   }
 
   file->private_data = my_dev;
-  printk(KERN_INFO "port c open over\n");
+  printk(KERN_INFO "PORTC: open over\n");
 exit:
   return retval;
 }
@@ -430,6 +473,8 @@ static ssize_t port_c_read(struct file *file, char *buf, size_t count, loff_t *o
   unsigned long long temp_in_k;
   int temp_in_c;
 
+  access_count++;
+
   my_dev = file->private_data;
 
   retval = labjack_access(my_dev, fb_cmd_buf, 10, fb_cmd_resp, 12);
@@ -444,9 +489,9 @@ static ssize_t port_c_read(struct file *file, char *buf, size_t count, loff_t *o
   temp_in_k = bits * slope;
   temp_in_k >>= 32;
 
-  printk(KERN_INFO "KELVIN: %lld\n", temp_in_k);
+  printk(KERN_INFO "PORTC: KELVIN: %lld\n", temp_in_k);
   temp_in_c = temp_in_k - 273;
-  printk(KERN_INFO "CELSIUS: %d\n", temp_in_c);
+  printk(KERN_INFO "PORTC: CELSIUS: %d\n", temp_in_c);
 
   return 0;
 }
@@ -499,7 +544,7 @@ static int blec_probe(struct usb_interface *interface, const struct usb_device_i
   int cdev_maj_min;
   int i;
 
-  printk(KERN_INFO "blec_usb blec_probe() called...\n");
+  printk(KERN_INFO "BLEC_USB: blec_probe() called...\n");
 
   probed_dev = kzalloc(sizeof(struct blec_dev),GFP_KERNEL);
 
@@ -552,28 +597,40 @@ static void blec_disconnect(struct usb_interface *interface)
   struct blec_dev *probed_dev;
   int err;
 
-  printk(KERN_INFO "blec_usb blec_disconnect() called...\n");
+  printk(KERN_INFO "BLEC_USB: blec_disconnect() called...\n");
 
   probed_dev = usb_get_intfdata(interface);
 
-  printk(KERN_INFO "blec_usb blec_disconnect(): device_destroy\n");
+  if (probed_dev->port_a_file_count != 0)
+  {
+    printk(KERN_INFO "BLEC_USB: blec_disconnect: port a files open, destroying...\n");
+    port_a_destroy(probed_dev);
+  }
+
+  if (probed_dev->port_b_file_count != 0)
+  {
+    printk(KERN_INFO "BLEC_USB: blec_disconnect: port b files open, destroying...\n");
+    port_b_destroy(probed_dev);
+  }
+
+  printk(KERN_INFO "BLEC_USB: blec_disconnect(): device_destroy\n");
 
   device_destroy(blec_mod_g.dev_class, probed_dev->cdev_a_t);
   device_destroy(blec_mod_g.dev_class, probed_dev->cdev_b_t);
   device_destroy(blec_mod_g.dev_class, probed_dev->cdev_c_t);
   
-  printk(KERN_INFO "blec_usb blec_disconnect(): device_destroy complete\n");
-  printk(KERN_INFO "blec_usb blec_disconnect(): cdev_del \n");
+  printk(KERN_INFO "BLEC_USB: blec_disconnect(): device_destroy complete\n");
+  printk(KERN_INFO "BLEC_USB: blec_disconnect(): cdev_del \n");
 
   cdev_del(&(probed_dev->cdev_a));
   cdev_del(&(probed_dev->cdev_b));
   cdev_del(&(probed_dev->cdev_c));
 
-  printk(KERN_INFO "blec_usb blec_disconnect(): cdev_del complete \n");
+  printk(KERN_INFO "BLEC_USB: blec_disconnect(): cdev_del complete \n");
 
   err = remove_from_intf_pool(interface);
   if (err == -1)
-    printk(KERN_INFO "blec_usb blec_disconnect(): didn't find interface in pool (this bad) \n");
+    printk(KERN_INFO "BLEC_USB: blec_disconnect(): didn't find interface in pool (this bad) \n");
 
   if (probed_dev->port_a_mutex)
     kfree(probed_dev->port_a_mutex);
@@ -583,25 +640,26 @@ static void blec_disconnect(struct usb_interface *interface)
 
 static int __init blec_usb_init(void)
 {
-  printk(KERN_INFO "blec_usb module loading...\n");
+  printk(KERN_INFO "BLEC_USB: module loading...\n");
+
 
   memset(&blec_mod_g, 0, sizeof(struct blec_mod));
 
   if (alloc_chrdev_region(&blec_mod_g.t_node, 0, MAX_DEV*3, DRIVER_NAME ))
   {
-    printk(KERN_ERR "alloc_chrdev_region() failed!\n");
+    printk(KERN_ERR "BLEC_USB: alloc_chrdev_region() failed!\n");
     goto chrdev_err;
   }
 
   if (IS_ERR(blec_mod_g.dev_class = class_create(THIS_MODULE, DRIVER_NAME)))
   {
-    printk(KERN_ERR "class_create() failed!\n");
+    printk(KERN_ERR "BLEC_USB: class_create() failed!\n");
     goto cls_crt_err;
   }
   
   if (usb_register(&blec_driver))
   {
-    printk(KERN_ERR "usb_register() failed!\n");
+    printk(KERN_ERR "BLEC_USB: usb_register() failed!\n");
     goto usb_reg_err;
   }
 
@@ -620,7 +678,7 @@ chrdev_err:
 
 static void __exit blec_usb_exit(void)
 {
-  printk(KERN_INFO "blec_usb module unloading...\n");
+  printk(KERN_INFO "BLEC_USB: module unloading...\n");
 
   if (blec_mod_g.usb_rw_mutex)
     kfree(blec_mod_g.usb_rw_mutex);
