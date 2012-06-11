@@ -276,6 +276,8 @@ exit:
 static ssize_t port_a_read(struct file *file, char *buf, size_t count, loff_t *offset)
 {
   struct blec_dev *my_dev;
+  char airlock_open_string[] = "Airlock Open!";
+  ssize_t len;
   my_dev = file->private_data;
 
   access_count++;
@@ -287,7 +289,10 @@ static ssize_t port_a_read(struct file *file, char *buf, size_t count, loff_t *o
 
   printk(KERN_INFO "Airlock Open!\n");
 
-  return 0;
+  len = min_t(ssize_t, count, sizeof(airlock_open_string));
+  copy_to_user(buf, airlock_open_string, len);
+
+  return len;
 }
 
 static struct file_operations port_a_fops = {
